@@ -1,0 +1,44 @@
+name: Daily Stock Analysis
+
+# 1. 触发机制：每天下午 17:00 (UTC时间) 运行
+# 注意：GitHub Actions 默认是 UTC 时间。
+# 如果你想在北京时间 17:00 运行，需要改成 09:00 (因为北京时间 = UTC + 8)
+# 下面的例子设置为北京时间 16:05 运行（对应 UTC 08:05）
+on:
+  schedule:
+    - cron: '5 8 * * *'  # 每天 UTC 8点05分 (即北京时间 16:05)
+  workflow_dispatch:     # 允许手动点击按钮运行
+
+jobs:
+  run-analysis:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 2. 下载你的代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 3. 安装 Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      # 4. 安装依赖 (包括你刚才加的 dashscope)
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      # 5. 运行主程序
+      # 关键：这里把你在 Secrets 和 Variables 里存的东西，
+      # 注入到运行环境中，让程序能读取到
+      - name: Run Stock Analysis
+        env:
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          LITELLM_MODEL: ${{ vars.LITELLM_MODEL }}
+          OPENAI_API_BASE: ${{ vars.OPENAI_API_BASE }}
+        run: |
+          # 根据项目的实际启动文件修改下面这行
+          # 常见的启动文件名: main.py, app.py, src/main.py, run.py
+          python src/main.py
