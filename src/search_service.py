@@ -15,6 +15,7 @@ import logging
 import re
 import threading
 import time
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -207,7 +208,7 @@ class BaseSearchProvider(ABC):
         logger.warning(f"[{self._name}] API Key {key[:8]}... 错误计数: {error_count}")
     
     @abstractmethod
-    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7,topic: Optional[str] = None,country: Optional[str] = None) -> SearchResponse:
         """执行搜索（子类实现）"""
         pass
     
@@ -294,6 +295,7 @@ class TavilySearchProvider(BaseSearchProvider):
         max_results: int,
         days: int = 7,
         topic: Optional[str] = None,
+        country: Optional[str] = None,          # <-- 新增 country 参数
     ) -> SearchResponse:
         """执行 Tavily 搜索"""
         try:
@@ -321,6 +323,10 @@ class TavilySearchProvider(BaseSearchProvider):
             }
             if topic is not None:
                 search_kwargs["topic"] = topic
+
+            # 🆕 如果传入了 country，则添加到请求中
+            if country is not None:
+                search_kwargs["country"] = country
 
             response = client.search(
                 **search_kwargs,
@@ -368,9 +374,10 @@ class TavilySearchProvider(BaseSearchProvider):
         max_results: int = 5,
         days: int = 7,
         topic: Optional[str] = None,
+        country: Optional[str] = None,          # <-- 新增 country 参数
     ) -> SearchResponse:
-        """执行 Tavily 搜索，可按调用方选择是否启用新闻 topic。"""
-        if topic is None:
+        """执行 Tavily 搜索，可按调用方选择是否启用新闻 topic，以及指定国家/地区。"""
+        if topic is None and country is None:
             return super().search(query, max_results=max_results, days=days)
 
         api_key = self._get_next_key()
@@ -385,7 +392,10 @@ class TavilySearchProvider(BaseSearchProvider):
 
         start_time = time.time()
         try:
-            response = self._do_search(query, api_key, max_results, days=days, topic=topic)
+            response = self._do_search(
+                query, api_key, max_results,
+                days=days, topic=topic, country=country
+            )
             response.search_time = time.time() - start_time
 
             if response.success:
@@ -2092,6 +2102,7 @@ class SearchService:
     3. 结果聚合和格式化
     4. 数据源失败时的增强搜索（股价、走势等）
     5. 港股/美股自动使用英文搜索关键词
+    6. 支持 Tavily 的国家/地区偏好（环境变量 TAVILY_COUNTRY）
     """
     
     # 增强搜索关键词模板（A股 中文）
@@ -2129,6 +2140,7 @@ class SearchService:
         searxng_public_instances_enabled: bool = True,
         news_max_age_days: int = 3,
         news_strategy_profile: str = "short",
+        tavily_country: Optional[str] = None,          # <-- 新增参数
     ):
         """
         初始化搜索服务
@@ -2144,6 +2156,7 @@ class SearchService:
             searxng_public_instances_enabled: 未配置自建实例时，是否自动使用公共 SearXNG 实例
             news_max_age_days: 新闻最大时效（天）
             news_strategy_profile: 新闻窗口策略档位（ultra_short/short/medium/long）
+            tavily_country: Tavily 搜索的国家/地区偏好（如 "china", "us"），从环境变量 TAVILY_COUNTRY 读取
         """
         self._providers: List[BaseSearchProvider] = []
         self.news_max_age_days = max(1, news_max_age_days)
@@ -2162,6 +2175,13 @@ class SearchService:
             self.news_strategy_profile,
             NEWS_STRATEGY_WINDOWS["short"],
         )
+
+        # 处理 Tavily 的国家/地区参数
+        if tavily_country is None:
+            tavily_country = os.environ.get("TAVILY_COUNTRY")
+        self._tavily_country = tavily_country
+        if self._tavily_country:
+            logger.info(f"Tavily 将使用国家/地区偏好: {self._tavily_country}")
 
         # 初始化搜索引擎（按优先级排序）
         # 1. Bocha 优先（中文搜索优化，AI摘要）
@@ -2804,6 +2824,9 @@ class SearchService:
                 search_kwargs: Dict[str, Any] = {}
                 if isinstance(provider, TavilySearchProvider):
                     search_kwargs["topic"] = "news"
+                    # 🆕 如果配置了 Tavily country，则注入
+                    if self._tavily_country:
+                        search_kwargs["country"] = self._tavily_country
                 elif isinstance(provider, BraveSearchProvider):
                     search_kwargs.update(
                         self._brave_search_locale(
@@ -3122,11 +3145,16 @@ class SearchService:
             logger.info(f"[情报搜索] {dim['desc']}: 使用 {provider.name}")
 
             if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
+                # 🆕 如果配置了 Tavily country，则注入
+                country_kw = {}
+                if self._tavily_country:
+                    country_kw = {"country": self._tavily_country}
                 response = provider.search(
                     dim['query'],
                     max_results=provider_max_results,
                     days=search_days,
                     topic=dim['tavily_topic'],
+                    **country_kw,
                 )
             else:
                 response = provider.search(
@@ -3435,6 +3463,11 @@ def get_search_service() -> SearchService:
                 from src.config import get_config
                 config = get_config()
                 
+                # 尝试从配置中读取 tavily_country（如果 config 有该属性）
+                tavily_country = getattr(config, "tavily_country", None)
+                if tavily_country is None:
+                    tavily_country = os.environ.get("TAVILY_COUNTRY")
+                
                 _search_service = SearchService(
                     bocha_keys=config.bocha_api_keys,
                     tavily_keys=config.tavily_api_keys,
@@ -3446,6 +3479,7 @@ def get_search_service() -> SearchService:
                     searxng_public_instances_enabled=config.searxng_public_instances_enabled,
                     news_max_age_days=config.news_max_age_days,
                     news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
+                    tavily_country=tavily_country,
                 )
     
     return _search_service
